@@ -99,6 +99,11 @@ def sample_color_from_texture(texcoord, img, draw):
     x = max(0, min(x, width - 1))
     y = max(0, min(y, height - 1))
 
+    pixel = img.getpixel((x, y))
+    if len(pixel) == 3:
+        return pixel + (255,)
+    return pixel
+
     draw.ellipse((x-1, y-1, x+1, y+1), fill=(img.getpixel((x, y))))  # Draw a red dot
     return img.getpixel((x, y))  # Return color including alpha
 

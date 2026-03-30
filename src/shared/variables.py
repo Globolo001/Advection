@@ -100,7 +100,6 @@ class ModelData():
     lock_size_ratio = True
     width, height, depth = "0", "0", "0"
     old_width, old_height, old_depth = "0", "0", "0"
-    
 class ImageData():
     original_width, original_height = 0, 0
     default_width_density, default_height_density = 8, 8
@@ -131,8 +130,10 @@ class OutputData():
     path = None
 
 class ParticlesCache():
-    DataParticlesCloud = None
+    DataParticlesCloud = None          # Original full-resolution cloud (used for export)
+    PreviewDataParticlesCloud = None   # Downsampled cloud for the 3D preview
     TexturedParticlesCloud = None
+    max_preview_particles = 4000       # Default preview target; adjustable via slider
 
 
 class Modifiers():

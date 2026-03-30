@@ -65,11 +65,11 @@ def create_DataParticlesCloud_from_file(file_path, modifiers= None, reset_image_
     print("create_DataParticlesCloud_from_file")
     
     if file_path.endswith('.obj'):
-        DataParticlesCloud = create_DataParticlesCloud_from_obj_file(file_path,modifiers)
+        cloud = create_DataParticlesCloud_from_obj_file(file_path,modifiers)
     if file_path.endswith('.png') or file_path.endswith('.jpg') or file_path.endswith('.jpeg'):
-        DataParticlesCloud = create_DataParticlesCloud_from_image(file_path, reset_image_data,modifiers)
+        cloud = create_DataParticlesCloud_from_image(file_path, reset_image_data,modifiers)
 
-    return DataParticlesCloud
+    return cloud
 
 def create_DataParticlesCloud_from_obj_file(obj_file_path, modifiers):
     def extract_obj_lines(obj_file_path):
@@ -147,7 +147,10 @@ def create_DataParticlesCloud_from_obj_file(obj_file_path, modifiers):
         # If the material the face is using exists
         if face_material in materials:
             if materials[face_material]['texture'] is not None: # Try using the texture
-                img = Image.open(materials[face_material]['texture'])  # Open the texture image
+                # Cache opened texture images to avoid reopening per face
+                if face_material not in _texture_cache:
+                    _texture_cache[face_material] = Image.open(materials[face_material]['texture']).convert('RGBA')
+                img = _texture_cache[face_material]
 
                 # Calculate the average texture coordinates for the face
                 texcoord_center = calculate_face_texture_center(texture_coordinates, face)
@@ -218,6 +221,7 @@ def create_DataParticlesCloud_from_obj_file(obj_file_path, modifiers):
 
     # Creating the particle cloud
     dataParticlesList = []
+    _texture_cache = {}  # Cache for opened texture images
 
 
     if materials:
@@ -426,7 +430,10 @@ def sample_color_from_texture(texcoord, img: Image.Image):
     x = max(0, min(x, width - 1))
     y = max(0, min(y, height - 1))
 
-    return img.getpixel((x, y))  # Return color including alpha
+    pixel = img.getpixel((x, y))  # Return color including alpha
+    if len(pixel) == 3:
+        return pixel + (255,)
+    return pixel
 
 def write_mcfunction_file(input, output_path, output_name,modifiers):
 

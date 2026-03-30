@@ -1,4 +1,6 @@
 import tkinter as tk
+import tkinter.filedialog
+import tkinter.messagebox
 import customtkinter
 import CTkColorPicker
 import CTkToolTip
@@ -6,15 +8,38 @@ from os import path as os_path
 import src.backend.file_dialog as fd
 import src.backend.file_processor as fp
 import src.frontend.exporter_dialog as ed
+from src.backend.data_particle import downsample_particles
 from src.shared.variables import *
 import src.shared.color_operations as co
 from PIL import Image
 import numexpr
+import math as _math
 
+_slider_guard = [False]  # Module-level: prevents spurious callbacks during programmatic slider updates
 
+def _fmt_count(n):
+    """Format a particle count: e.g. 4000 -> '4k', 348062 -> '348.1k'."""
+    if n >= 1000:
+        v = n / 1000
+        return f'{v:.1f}k' if v != int(v) else f'{int(v)}k'
+    return str(n)
 
+# Logarithmic slider mapping: slider position [0..1] <-> particle count [min..max]
+_PREVIEW_SLIDER_MIN = 100
 
+def _slider_to_count(slider_val, max_count):
+    """Map a 0..1 slider position to a particle count using log scale."""
+    lo = _math.log(_PREVIEW_SLIDER_MIN)
+    hi = _math.log(max(max_count, _PREVIEW_SLIDER_MIN + 1))
+    return int(round(_math.exp(lo + slider_val * (hi - lo))))
 
+def _count_to_slider(count, max_count):
+    """Map a particle count to a 0..1 slider position using log scale."""
+    lo = _math.log(_PREVIEW_SLIDER_MIN)
+    hi = _math.log(max(max_count, _PREVIEW_SLIDER_MIN + 1))
+    if hi == lo:
+        return 0.0
+    return max(0.0, min(1.0, (_math.log(max(count, _PREVIEW_SLIDER_MIN)) - lo) / (hi - lo)))
 
 class Input():
     path = ""
@@ -53,7 +78,15 @@ class UI():
         TkApp.geometry(f"{AppConstants.WIDTH}x{AppConstants.HEIGHT}")
         TkApp.configure(background=Styles.black)
         TkApp.title("Advection - Animation to particles")
-        TkApp.iconbitmap("./src/assets/icon.ico")
+        try:
+            _icon_img = Image.open(os_path.join(os_path.dirname(__file__), '..', 'assets', 'advection.png'))
+            # Scale up for a crisp icon (tkinter needs PhotoImage)
+            _icon_img = _icon_img.resize((256, 256), Image.NEAREST)
+            from PIL.ImageTk import PhotoImage as _PhotoImage
+            _icon_photo = _PhotoImage(_icon_img)
+            TkApp.iconphoto(True, _icon_photo)
+        except Exception:
+            pass
 
         config_frame_border = tk.Frame(TkApp,background=Styles.almost_black)
         config_frame = tk.Frame(config_frame_border,background=Styles.almost_black)
@@ -105,7 +138,7 @@ class UI():
         def choose_input_dialog():
             print("find_input_dialog")
             initial_directory = fd.get_json_memory("input_path") # Retrive the last path from the JSON file
-            dialog_result = tk.filedialog.askopenfilename(initialdir=initial_directory, filetypes=[("OBJ or Image Files","*.obj;*.png;*.jpg;*.jpeg")]) # Ask for a file
+            dialog_result = tk.filedialog.askopenfilename(initialdir=initial_directory, filetypes=[("OBJ Files", "*.obj"), ("Image Files", "*.png *.jpg *.jpeg")]) # Ask for a file
             if dialog_result == "":
                 print("User exited file dialog without selecting a file")
                 return
@@ -203,25 +236,74 @@ class UI():
             else: 
                 print("DataParticlesCloud created", "Particle center: ",newDataParticlesCloud.center, "Particles count: ",newDataParticlesCloud.count)
                 ParticlesCache.DataParticlesCloud = newDataParticlesCloud
-                ParticlesCache.TexturedParticlesCloud = PygameData.PygameRenderer.DataParticlesCloud_to_TexturedParticlesCloud(ParticlesCache.DataParticlesCloud) # Create the TexturedParticlesCloud
+
+                # Update the preview slider range and apply downsampling
+                UI.apply_preview_downsample()
+
+                PygameData.PygameRenderer.frame_model(newDataParticlesCloud)
                 PygameData.PygameRenderer.refresh_cloud_stats()
                 PygameTempData.update_requested += 2
             
         def random_cloud():
             print("random_cloud")
             InputData.mode = "model"
-            # UI.image_frame.grid_forget()
             UI.model_frame.grid(row = 3, column = 0,sticky="nsew",pady=5,padx=10)
             
             AlignmentData.horizontal_align.set('None')
             AlignmentData.vertical_align.set('None')
             ParticlesCache.DataParticlesCloud = fp.create_random_cube_DataParticlesCloud(100,(2,2,2))
-            ParticlesCache.TexturedParticlesCloud = PygameData.PygameRenderer.DataParticlesCloud_to_TexturedParticlesCloud(ParticlesCache.DataParticlesCloud) # Create the TexturedParticlesCloud
+            UI.apply_preview_downsample()
             UI.reset_model_resize() # Update the model resize
             PygameData.PygameRenderer.refresh_cloud_stats()
             PygameTempData.update_requested += 2
 
             print(ParticlesCache.DataParticlesCloud.min_pos,ParticlesCache.DataParticlesCloud.max_pos)
+
+        def apply_preview_downsample():
+            """Downsample the original cloud for preview and rebuild TexturedParticlesCloud."""
+            original = ParticlesCache.DataParticlesCloud
+            if original is None:
+                return
+            target = ParticlesCache.max_preview_particles
+            if original.count > target:
+                preview = downsample_particles(original, target)
+            else:
+                preview = original
+            ParticlesCache.PreviewDataParticlesCloud = preview
+            ParticlesCache.TexturedParticlesCloud = PygameData.PygameRenderer.DataParticlesCloud_to_TexturedParticlesCloud(preview)
+
+            # Update the slider position if it exists
+            if hasattr(UI, 'preview_particles_slider'):
+                _slider_guard[0] = True
+                if hasattr(UI, 'preview_particles_debouncer') and UI.preview_particles_debouncer.after_id:
+                    UI.TkApp.after_cancel(UI.preview_particles_debouncer.after_id)
+                    UI.preview_particles_debouncer.after_id = None
+                UI.preview_particles_slider.set(_count_to_slider(min(target, original.count), original.count))
+                _slider_guard[0] = False
+                UI.preview_particles_label.configure(text=f'{_fmt_count(preview.count)} / {_fmt_count(original.count)}')
+
+        def preview_particles_slider_moved(value):
+            """Called when the preview particle count slider is moved."""
+            if _slider_guard[0]:
+                return
+            max_count = ParticlesCache.DataParticlesCloud.count if ParticlesCache.DataParticlesCloud else 50000
+            target = _slider_to_count(float(value), max_count)
+            ParticlesCache.max_preview_particles = target
+            orig_count = ParticlesCache.DataParticlesCloud.count if ParticlesCache.DataParticlesCloud else 0
+            UI.preview_particles_label.configure(
+                text=f'{_fmt_count(target)} / {_fmt_count(orig_count)}'
+                if orig_count else _fmt_count(target))
+
+        def preview_particles_slider_apply(value):
+            """Debounced: rebuild the preview cloud at the new target."""
+            if _slider_guard[0]:
+                return
+            max_count = ParticlesCache.DataParticlesCloud.count if ParticlesCache.DataParticlesCloud else 50000
+            target = _slider_to_count(float(value), max_count)
+            ParticlesCache.max_preview_particles = target
+            UI.apply_preview_downsample()
+            PygameData.PygameRenderer.refresh_cloud_stats()
+            PygameTempData.update_requested += 2
 
 
         def reset_model_resize():
@@ -295,7 +377,6 @@ class UI():
             if InputData.first_frame == InputData.last_frame: # If the sequence is 1 frame long
                 InputData.last_frame += 1 # To prevent slider error
                 UI.sequence_detected_label.configure(text_color=Styles.light_gray)
-                # PygameSettings.toggle.set(False)
                 if UI.sequence_checkbox.get() == True:
                     UI.sequence_checkbox.toggle() # Unckeck sequence and update the UI
                 UI.sequence_checkbox.configure(state="disabled") # Make sequence uncheckable
@@ -344,13 +425,14 @@ class UI():
             if UI.sequence_checkbox.get() == 1:
                 UI.sequence_start_Entry.configure(**Styles.normal_entry_style,placeholder_text="start")
                 UI.sequence_end_Entry.configure(**Styles.normal_entry_style,placeholder_text="end")
-                # preview_frame_slider.pack(side=tk.BOTTOM, expand=False, padx=50, pady=50)
                 UI.preview_frame_slider.configure(**Styles.normal_preview_slider_style)
+                UI.preview_frame_slider.pack(side=tk.BOTTOM, expand=False, padx=0, pady=0)
+                UI.preview_frame_label.pack(side=tk.BOTTOM, expand=False, padx=0, pady=0)
             else:
                 UI.sequence_start_Entry.configure(**Styles.disabled_entry_style)
                 UI.sequence_end_Entry.configure(**Styles.disabled_entry_style)
-                # preview_frame_slider.pack_forget()
-                UI.preview_frame_slider.configure(**Styles.disabled_preview_slider_style)
+                UI.preview_frame_slider.pack_forget()
+                UI.preview_frame_label.pack_forget()
 
 
 
@@ -371,7 +453,6 @@ class UI():
             if color != None:
                 UI.particle_hexcode_entry.cget("textvariable").set(color)
                 UI.particle_color_button.configure(fg_color=color)
-                # UI.particle_hexcode_entry.cget("textvariable").set(color)
                 ParticleData.force_color = color
                 ParticlesCache.TexturedParticlesCloud.refresh_colors()
 
@@ -465,8 +546,6 @@ class UI():
         input_frame.grid(row = 0, column = 0,sticky="nsew",pady=5,padx=10)
         sequence_frame.grid(row = 1, column = 0,sticky="nsew",pady=5,padx=10)
         alignment_frame.grid(row = 2, column = 0,sticky="nsew",pady=5,padx=10)
-        # model_frame.grid(row = 3, column = 0,sticky="nsew",pady=5,padx=10)
-        # image_frame.grid(row = 4, column = 0,sticky="nsew",pady=5,padx=10)
         particle_frame.grid(row = 4, column = 0,sticky="nsew",pady=5,padx=10)
 
 
@@ -609,8 +688,6 @@ class UI():
         model_alpha_threshold_slider = customtkinter.CTkSlider(model_frame,from_=0, to=254,number_of_steps=256,**Styles.normal_slider_style,command=alpha_threshold_slider_debouncer.debouncer)
         model_alpha_threshold_tooltip = CTkToolTip.CTkToolTip(model_alpha_threshold_slider, message= str(InputData.alpha_threshold), delay= 0, x_offset= -20, y_offset= 20, font= Styles.InterFont)
 
-        # ModelData.resize_toggle = tk.IntVar(value=ModelData.resize_toggle)
-        # model_resize_checkbox = customtkinter.CTkCheckBox(model_frame,variable=ModelData.resize_toggle,command=toggle_model_resize_section, text="Resize", onvalue=True, offvalue=False,**Styles.checkbox_style)
         def lock_model_size_ratio():
             if ModelData.lock_size_ratio == True:
                 ModelData.lock_size_ratio = False
@@ -636,11 +713,8 @@ class UI():
         model_depth_label.grid(column=5, row=0, padx=0, pady=0,sticky="s")
 
         model_width_entry.grid(column=1, row=1, padx=15, pady=0,sticky="n")
-        # model_wh_X_label.grid(column=2, row=1, padx=0, pady=0,sticky="n")
         model_height_entry.grid(column=3, row=1, padx=15, pady=0,sticky="n")
-        # model_hd_X_label.grid(column=4, row=1, padx=0, pady=0,sticky="n")
         model_depth_entry.grid(column=5, row=1, padx=15, pady=0,sticky="n")
-        # model_resize_checkbox.grid(column=6, row=1, padx=0, pady=0,sticky="nw")
         model_size_ratio_button_1.grid(column=2, row=1, padx=0, pady=0,sticky="nw")
         model_size_ratio_button_2.grid(column=4, row=1, padx=0, pady=0,sticky="nw")
 
@@ -958,11 +1032,6 @@ class UI():
         
         lock_resolution_ratio_toggle_button = customtkinter.CTkButton(image_frame,command=lock_image_resolution_ratio, image = link_close_button_image, text=None,width=0,**Styles.ratio_button_style)
         resolution_X_label = customtkinter.CTkLabel(image_frame, text="X",text_color=Styles.white,font=("Inter", 20))
-        # update_image_resolution_button = customtkinter.CTkButton(image_frame,command=update_image_resolution, text="Update",width=0,**Styles.normal_button_style)
-        # sv.image_resize_boolean = tk.IntVar(value=sv.image_resize_boolean)
-        # image_resize_checkbox = customtkinter.CTkCheckBox(image_frame,variable=sv.image_resize_boolean,command=None, text="Resize", onvalue=True, offvalue=False,**Styles.checkbox_style)
-
-
 
         image_alpha_threshold_label = customtkinter.CTkLabel(image_frame, text="Alpha threshold",text_color=Styles.light_gray,font=Styles.InterFont)
         image_alpha_threshold_slider = customtkinter.CTkSlider(image_frame,from_=0, to=254,number_of_steps=256,**Styles.normal_slider_style,command=alpha_threshold_slider_debouncer.debouncer)
@@ -1006,8 +1075,6 @@ class UI():
 
         image_resampling_label.grid(column=0, row=5, padx=15, pady=0,sticky="en")
         image_resampling_menu.grid(column=1, columnspan=3, row=5, padx=0, pady=0,sticky="wen")
-        # update_image_resolution_button.grid(column=4, row=4, padx=0, pady=0,sticky="nw")
-        # image_resize_checkbox.grid(column=4, row=4, padx=0, pady=0,sticky="nw")
         image_alpha_threshold_label.grid(column=0, row=6, padx=0, pady=0,sticky="e")
         image_alpha_threshold_slider.grid(column=1, columnspan=3, row=6, padx=15, pady=0,sticky="we")
 
@@ -1018,13 +1085,8 @@ class UI():
         """ 2 PARTICLE """
         # ELEMENT PARAMETERS
         particle_size_label = customtkinter.CTkLabel(particle_frame, text="Particle Size",text_color=Styles.light_gray,font=Styles.InterFont)
-        # preview_frame_slider = customtkinter.CTkSlider(preview_frame,from_=0, to=100,number_of_steps=10,variable=PygameData.frame,**Styles.disabled_slider_style,command=preview_frame_slider_debouncer.debouncer)
         particle_size_slider = customtkinter.CTkSlider(particle_frame,from_=0, to=1,number_of_steps=10,variable= customtkinter.DoubleVar(value=0.5),**Styles.normal_slider_style,command=particle_size_slider_moved)
         particle_size_tooltip = CTkToolTip.CTkToolTip(particle_size_slider, message= str(ParticleData.size), delay= 0, x_offset= -20, y_offset= 20, font= Styles.InterFont)
-
-        # particle_size_entry = customtkinter.CTkEntry(particle_frame, **Styles.normal_entry_style,textvariable=ParticleData.size,font=Styles.InterFont)
-        # particle_size_entry.bind("<FocusOut>", particle_size_slider_moved)
-        # particle_size_entry.bind("<Return>", particle_size_slider_moved)
 
         def change_particle_type(value):
             PygameData.PygameRenderer.set_particles_texture(value)
@@ -1080,7 +1142,7 @@ class UI():
 
         # GRID PARAMETERS
         particle_frame.grid_columnconfigure([0,1,2,3], weight=1,uniform="a")
-        particle_frame.grid_rowconfigure([0,1,2], weight=1,uniform="a")
+        particle_frame.grid_rowconfigure([0,1,2,3], weight=1,uniform="a")
 
         # PLACEMENT PARAMETERS
         particle_size_label.grid(column=0, row=0, padx=0, pady=0,sticky="e")
@@ -1099,17 +1161,21 @@ class UI():
         particle_hexcode_entry.grid(column=2, row=2, padx=0, pady=0)
         particle_color_button.grid(column=1, row=2, padx=15, pady=0,sticky="we")
 
-
-
-
-        # SequenceData.toggle = tk.IntVar(value=0)
-        # sequence_checkbox = customtkinter.CTkCheckBox(input_frame,state="disabled",variable=SequenceData.toggle,command=update_sequence_section, text="Sequence", onvalue=True, offvalue=False,checkbox_width=20,checkbox_height=20,text_color=Styles.white,border_color=Styles.white,border_width=1)
-        # sequence_checkbox.grid(column=1, row=2, padx=0, pady=0)
-        # UI.sequence_start_Entry = customtkinter.CTkEntry(input_frame, **Styles.disabled_entry_style,textvariable=customtkinter.StringVar(value="start"))
-        # UI.sequence_start_Entry.grid(column=2, row=2, padx=0, pady=0)
-        # UI.sequence_end_Entry = customtkinter.CTkEntry(input_frame,**Styles.disabled_entry_style,textvariable=customtkinter.StringVar(value="end"))
-        # UI.sequence_end_Entry.grid(column=3, row=2, padx=0, pady=0)
-
+        # Preview particle count slider (row 3)
+        preview_particles_count_label = customtkinter.CTkLabel(particle_frame, text="Sampling",text_color=Styles.light_gray,font=Styles.InterFont)
+        preview_particles_debouncer = Debouncer(TkApp, 400, preview_particles_slider_moved, preview_particles_slider_apply)
+        def _guarded_slider_command(value, _d=preview_particles_debouncer):
+            if _slider_guard[0]:
+                return
+            _d.debouncer(value)
+        _slider_guard[0] = True
+        preview_particles_slider = customtkinter.CTkSlider(particle_frame,from_=0.0, to=1.0,number_of_steps=200,**Styles.normal_slider_style,command=_guarded_slider_command)
+        preview_particles_slider.set(_count_to_slider(ParticlesCache.max_preview_particles, 50000))
+        _slider_guard[0] = False
+        preview_particles_label = customtkinter.CTkLabel(particle_frame, text=_fmt_count(ParticlesCache.max_preview_particles),text_color=Styles.light_gray,font=Styles.InterFont)
+        preview_particles_count_label.grid(column=0, row=3, padx=0, pady=0,sticky="e")
+        preview_particles_slider.grid(column=1, columnspan=2, row=3, padx=15, pady=0,sticky="we")
+        preview_particles_label.grid(column=3, row=3, padx=0, pady=0,sticky="w")
 
 
         """ 1 EXPORT """
@@ -1131,24 +1197,19 @@ class UI():
 
 
         preview_frame_label = customtkinter.CTkLabel(preview_frame, text = 'frame',text_color=Styles.medium_gray,bg_color=Styles.almost_black,width=100)
-        preview_frame_label.pack(side=tk.BOTTOM, expand=False, padx=0, pady=0,)
 
         PygameData.frame = customtkinter.IntVar(value=0)
         preview_frame_slider_debouncer = Debouncer(TkApp, 500, slider_update_preview_frame_label, slider_update_preview_frame)
         preview_frame_slider = customtkinter.CTkSlider(preview_frame,from_=0, to=100,number_of_steps=10,variable=PygameData.frame,**Styles.disabled_preview_slider_style,command=preview_frame_slider_debouncer.debouncer)
-        preview_frame_slider.pack(side=tk.BOTTOM, expand=False, padx=0, pady=0)
+        # Hidden by default; shown when sequence mode is active
 
 
         def reset_camera_button_pressed():
             PygameData.PygameRenderer.reset_camera()
             
 
-        # randomize_button = customtkinter.CTkButton(preview_frame, text = 'randomize',  command = None,bg_color='black',fg_color='#7a7a7a',hover_color=Styles.hover_color,text_color=Styles.white)
-        # randomize_button.pack(side=tk.TOP, expand=False, padx=0, pady=0)
-        reset_camera_button = customtkinter.CTkButton(preview_frame, text = 'Reset camera',  command = reset_camera_button_pressed,bg_color='black',fg_color=Styles.dark_gray,hover_color=Styles.hover_color,text_color=Styles.light_gray)
-        reset_camera_button.pack(side=tk.TOP, expand=False, padx=0, pady=10)
-        # preview_button = customtkinter.CTkButton(pygame_frame, text = 'preview',  command = refresh_preview,bg_color='black',fg_color='#7a7a7a',hover_color=Styles.hover_color,text_color=Styles.white)
-        # preview_button.pack(side=tk.TOP, expand=False, padx=50, pady=10)
+        reset_camera_button = customtkinter.CTkButton(preview_frame, text = 'Reset Camera',  command = reset_camera_button_pressed,bg_color=Styles.almost_black,fg_color=Styles.dark_gray,hover_color=Styles.hover_color,text_color=Styles.light_gray,width=100,height=24,font=Styles.InterFont)
+        reset_camera_button.pack(side=tk.LEFT, expand=False, padx=10, pady=0)
 
         PygameData.toggle_render = tk.IntVar(value=PygameData.toggle_render)
         def toggle_preview():
@@ -1156,27 +1217,7 @@ class UI():
             PygameTempData.update_requested += 1
 
         preview_toggle_checkbox = customtkinter.CTkCheckBox(preview_frame,text="Preview",text_color=Styles.white,command=toggle_preview, variable=PygameData.toggle_render,onvalue=True, offvalue=False,checkbox_width=20,checkbox_height=20,fg_color=Styles.light_gray,hover_color=Styles.hover_color,bg_color=Styles.almost_black,border_color=Styles.white,border_width=1)
-        preview_toggle_checkbox.pack(side=tk.RIGHT, expand=False, padx=0, pady=0)
-
-
-        # progressbar = customtkinter.CTkProgressBar(button_win,  width=200, orientation="horizontal",mode="indeterminate",indeterminate_speed=1)
-        # progressbar.pack(side=tk.BOTTOM, expand=True)
-        # progressbar.start() 
-
-
-
-        
-
-
-
-   
-
-
-
-
-
-
-
+        preview_toggle_checkbox.pack(side=tk.RIGHT, expand=False, padx=10, pady=0)
 
 
 

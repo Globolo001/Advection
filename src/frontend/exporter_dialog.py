@@ -3,12 +3,8 @@ from src.shared.variables import *
 import multiprocessing
 import src.backend.file_processor as fp
 from os import path as os_path
-from os import startfile as os_startfile
 from os import name as os_name
-
-
-
-
+import subprocess
 
 
 class Exporter_Progress(ctk.CTkToplevel):
@@ -64,11 +60,10 @@ class Exporter_Progress(ctk.CTkToplevel):
 
     def open_output(self):
         if os_name == 'nt':  # Windows
-            os_startfile(self.output_path)
+            import os
+            os.startfile(self.output_path)
         elif os_name == 'posix':  # macOS or Linux
-            import subprocess
             subprocess.run(['open', '-R', self.output_path])
-        # super.destroy()
         self.stop()
             
 class Single_Exporter_Progress(Exporter_Progress):
@@ -110,16 +105,15 @@ class Single_Exporter_Progress(Exporter_Progress):
         self.allow_closing = True
         self.progress_bar.forget()
         self.cancel_button.forget()
-        self.label.configure(text=f"File exported to {OutputData.path}\{self.output_name}.mcfunction !")
+        self.label.configure(text=f"File exported to {os_path.join(OutputData.path, self.output_name)}.mcfunction !")
         self.open_output_button.pack(pady=10)
 
     def open_output(self):
         if os_name == 'nt':  # Windows
-            os_startfile(self.output_path)
+            import os
+            os.startfile(self.output_path)
         elif os_name == 'posix':  # macOS or Linux
-            import subprocess
             subprocess.run(['open', '-R', self.output_path])
-        # super.destroy()
         self.stop()
 
     def stop(self):

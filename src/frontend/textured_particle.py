@@ -48,19 +48,15 @@ class TexturedParticle():
         else:
             self.surface = texture
 
-# def position_variation(amount=0.02):
-#     offset = np.random.normal(-amount, amount, size=3)
-#     return tuple(offset) + (0,)
-
 class TexturedParticlesCloud:
     def __init__(self, DataParticlesCloud, textures):
         self.textures = textures
+        self._source_cloud = DataParticlesCloud
         if ParticleData.force_color_toggle:
             force_color = co.hex_to_rgb(ParticleData.force_color)
-            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, force_color)) for DataParticle in ParticlesCache.DataParticlesCloud.DataParticlesList]
+            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, force_color)) for DataParticle in DataParticlesCloud.DataParticlesList]
         else:
-            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, DataParticle.color)) for DataParticle in ParticlesCache.DataParticlesCloud.DataParticlesList]        
-        # self.particle_positions = [position_variation(position) for position in DataParticlesCloud.particle_positions]
+            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, DataParticle.color)) for DataParticle in DataParticlesCloud.DataParticlesList]        
         self.particle_positions = DataParticlesCloud.particle_positions
         # Generate random position variations
         self.particle_position_variations = np.hstack((np.random.normal(scale=ParticleData.type_pos_variation[ParticleData.particle_type.get()], size=(len(DataParticlesCloud.particle_positions), 3)), np.zeros((len(DataParticlesCloud.particle_positions), 1))))
@@ -75,9 +71,9 @@ class TexturedParticlesCloud:
     def refresh_colors(self):
         if ParticleData.force_color_toggle:
             force_color = co.hex_to_rgb(ParticleData.force_color)
-            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, force_color)) for DataParticle in ParticlesCache.DataParticlesCloud.DataParticlesList]
+            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, force_color)) for DataParticle in self._source_cloud.DataParticlesList]
         else:
-            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, DataParticle.color)) for DataParticle in ParticlesCache.DataParticlesCloud.DataParticlesList]
+            self.TexturedParticlesList = [(TexturedParticle(self.textures, DataParticle.position, DataParticle.color)) for DataParticle in self._source_cloud.DataParticlesList]
         PygameTempData.update_requested += 1
     
     def draw(self,render):
